@@ -2,71 +2,147 @@ import cv2
 import numpy as np
 from PIL import ImageGrab
 import os
-from pynput import mouse
+from pynput import keyboard
+import glob
+import re
+import json
+import csv
 
 # Directory to save the screenshots
 screenshot_dir = "screenshots"
 
-def get_next_number(base_name):
-    files = os.listdir(screenshot_dir)
-    numbers = [int(f.split('_')[-1].split('.')[0]) for f in files if f.startswith(base_name) and f.split('_')[-1].split('.')[0].isdigit()]
-    return max(numbers) + 1 if numbers else 1
+# File to store image counts
+count_file = "image_counts.json"
 
-templates = ["templates/blind_play_template.png", "templates/blind_reward_template.png", 
-             "templates/blind_select_template.png", "templates/pack_large_template.png", 
-             "templates/pack_small_template.png", "templates/shop_template.png"]
+# CSV file to store image information
+csv_file = "image_labels.csv"
+
+# Define the base template names and their meanings
+base_templates = {
+    "blind_play_template": "Blind Play Screen",
+    "blind_reward_template": "Blind Reward Screen",
+    "blind_select_template": "Blind Selection Screen",
+    "pack_large_template": "Large Pack Screen",
+    "pack_small_template": "Small Pack Screen",
+    "shop_template": "Shop Screen"
+}
+
+def load_image_counts():
+    if os.path.exists(count_file):
+        with open(count_file, 'r') as f:
+            return json.load(f)
+    return {base: 0 for base in base_templates}
+
+def save_image_counts():
+    with open(count_file, 'w') as f:
+        json.dump(image_counts, f)
+
+def get_next_image_id():
+    return max([int(f.split('.')[0]) for f in os.listdir(screenshot_dir) if f.split('.')[0].isdigit()], default=0) + 1
+
+def save_image_info(image_id, label):
+    filepath = os.path.join(screenshot_dir, f"{image_id}.png")
+    label_meaning = base_templates[label]
+    
+    # Append to CSV file
+    with open(csv_file, 'a', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow([image_id, label, label_meaning])
+
+# Initialize image_counts from file
+image_counts = load_image_counts()
+
+# Initialize CSV file if it doesn't exist
+if not os.path.exists(csv_file):
+    with open(csv_file, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['Image ID', 'Label', 'Label Meaning'])
+
+# Initialize an empty list to hold template file paths
+templates = []
+
+# Search for files matching the pattern and append them to the templates list
+for base_template in base_templates:
+    template_files = glob.glob(f"templates/{base_template}_*.png")
+    templates.extend(template_files)
+
+print("Templates found:", templates)
+
+# Initialize dictionaries to store average images and counts
+average_images = {base: None for base in base_templates}
+
+def update_average(base_template, new_image):
+    if average_images[base_template] is None:
+        average_images[base_template] = new_image.astype(float)
+    else:
+        average_images[base_template] = (average_images[base_template] * image_counts[base_template] + new_image) / (image_counts[base_template] + 1)
+    image_counts[base_template] += 1
+    save_image_counts()
+    
+    # Save the updated average image
+    avg_image = average_images[base_template].astype(np.uint8)
+    cv2.imwrite(f"averages/{base_template}_average.png", avg_image)
 
 def process_screenshot():
     screenshot = ImageGrab.grab()
-    screenshot_path = os.path.join(screenshot_dir, "temp.png")
+    image_id = get_next_image_id()
+    screenshot_path = os.path.join(screenshot_dir, f"{image_id}.png")
     screenshot.save(screenshot_path)
 
-    for template in templates:
-        # Read the images
-        main_image = cv2.imread(screenshot_path)
-        template_image = cv2.imread(template)
+    main_image = cv2.imread(screenshot_path)
+    main_gray = cv2.cvtColor(main_image, cv2.COLOR_BGR2GRAY)
 
-        # Convert images to grayscale
-        main_gray = cv2.cvtColor(main_image, cv2.COLOR_BGR2GRAY)
+    best_match = None
+    best_val = -1
+    best_template = None
+
+    for template in templates:
+        template_image = cv2.imread(template)
         template_gray = cv2.cvtColor(template_image, cv2.COLOR_BGR2GRAY)
 
-        # Get the dimensions of the template
-        w, h = template_gray.shape[::-1]
-
-        # Perform template matching
         res = cv2.matchTemplate(main_gray, template_gray, cv2.TM_CCOEFF_NORMED)
+        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
 
-        # Set a threshold to detect the match
-        threshold = 0.7
-        loc = np.where(res >= threshold)
-        
-        # Check if a match is found
-        if np.where(res >= threshold):
-            print(f"Match found for template: {template}")
-            
-            # Determine the base name for the template
-            base_name = os.path.splitext(os.path.basename(template))[0]
-            
-            # Get the next number for the screenshot file
-            next_number = get_next_number(base_name)
-            
-            # Rename the temp screenshot to the new name
-            new_filename = f"{base_name}_{next_number}.png"
-            new_filepath = os.path.join(screenshot_dir, new_filename)
-            os.rename(screenshot_path, new_filepath)
-            
-            # Save the screenshot with the new name
-            screenshot.save(new_filepath)
-            
-            # Exit after the first match (remove this if you want to check for multiple templates)
-            break
+        if max_val > best_val:
+            best_val = max_val
+            best_match = max_loc
+            best_template = template
+
+    if best_val >= 0.7:  # Adjust threshold as needed
+        print(f"Best match found for template: {best_template} with value: {best_val}")
+
+        base_template = next(base for base in base_templates if base in best_template)
+        update_average(base_template, main_image)
+        save_image_info(image_id, base_template)
     else:
         print("No matches found.")
+        print("1: blind_play_template")
+        print("2: blind_reward_template")
+        print("3: blind_select_template")
+        print("4: pack_large_template")
+        print("5: pack_small_template")
+        print("6: shop_template")
+        
+        user_input = input("Please assign a base template number (e.g., 1 for blind_play_template): ")
+        if user_input in [str(i) for i in range(1, 7)]:
+            base_template = list(base_templates.keys())[int(user_input) - 1]
+            update_average(base_template, main_image)
+            save_image_info(image_id, base_template)
+        else:
+            print("Invalid input. Screenshot not saved.")
+            os.remove(screenshot_path)
 
-def on_click(x, y, button, pressed):
-    if pressed:
-        process_screenshot()
+def on_press(key):
+    try:
+        if key.char == '`':
+            process_screenshot()
+    except AttributeError:
+        pass
 
-# Set up the mouse listener
-with mouse.Listener(on_click=on_click) as listener:
+# Create 'averages' directory if it doesn't exist
+if not os.path.exists('averages'):
+    os.makedirs('averages')
+
+# Set up the keyboard listener
+with keyboard.Listener(on_press=on_press) as listener:
     listener.join()
