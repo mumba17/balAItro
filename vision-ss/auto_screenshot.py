@@ -3,19 +3,19 @@ import numpy as np
 from PIL import ImageGrab
 import os
 from pynput import keyboard
-import glob
-import re
 import json
 import csv
 
-# Directory to save the screenshots
+# Directories
 screenshot_dir = "screenshots"
+template_dir = "templates"
 
 # File to store image counts
 count_file = "image_counts.json"
 
-# CSV file to store image information
-csv_file = "image_labels.csv"
+# CSV files to store image information
+csv_file_template = "template_labels.csv"
+csv_file_screenshots = "screenshot_labels.csv"
 
 # Define the base template names and their meanings
 base_templates = {
@@ -38,35 +38,55 @@ def save_image_counts():
         json.dump(image_counts, f)
 
 def get_next_image_id():
-    return max([int(f.split('.')[0]) for f in os.listdir(screenshot_dir) if f.split('.')[0].isdigit()], default=0) + 1
+    existing_ids = [int(f.split('.')[0]) for f in os.listdir(screenshot_dir) if f.split('.')[0].isdigit()]
+    template_ids = []
+    screenshot_ids = []
+    
+    with open(csv_file_template, 'r') as f:
+        reader = csv.reader(f)
+        next(reader)  # Skip header
+        template_ids = [int(row[0]) for row in reader]
+    
+    with open(csv_file_screenshots, 'r') as f:
+        reader = csv.reader(f)
+        next(reader)  # Skip header
+        screenshot_ids = [int(row[0]) for row in reader]
+    
+    all_ids = existing_ids + template_ids + screenshot_ids
+    return max(all_ids, default=0) + 1
 
 def save_image_info(image_id, label):
     filepath = os.path.join(screenshot_dir, f"{image_id}.png")
-    label_meaning = base_templates[label]
     
     # Append to CSV file
-    with open(csv_file, 'a', newline='') as f:
+    with open(csv_file_screenshots, 'a', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow([image_id, label, label_meaning])
+        writer.writerow([image_id, label])
+
+def load_templates():
+    templates = []
+    with open(csv_file_template, 'r') as f:
+        reader = csv.reader(f)
+        next(reader)  # Skip header
+        for row in reader:
+            image_id, label = row
+            template_path = os.path.join(template_dir, f"{image_id}.png")
+            if os.path.exists(template_path):
+                templates.append((label, template_path))
+    return templates
 
 # Initialize image_counts from file
 image_counts = load_image_counts()
 
 # Initialize CSV file if it doesn't exist
-if not os.path.exists(csv_file):
-    with open(csv_file, 'w', newline='') as f:
+if not os.path.exists(csv_file_screenshots):
+    with open(csv_file_screenshots, 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['Image ID', 'Label', 'Label Meaning'])
+        writer.writerow(['Image ID', 'Label'])
 
-# Initialize an empty list to hold template file paths
-templates = []
-
-# Search for files matching the pattern and append them to the templates list
-for base_template in base_templates:
-    template_files = glob.glob(f"templates/{base_template}_*.png")
-    templates.extend(template_files)
-
-print("Templates found:", templates)
+# Load templates from CSV
+templates = load_templates()
+print("Templates loaded:", templates)
 
 # Initialize dictionaries to store average images and counts
 average_images = {base: None for base in base_templates}
@@ -96,8 +116,8 @@ def process_screenshot():
     best_val = -1
     best_template = None
 
-    for template in templates:
-        template_image = cv2.imread(template)
+    for label, template_path in templates:
+        template_image = cv2.imread(template_path)
         template_gray = cv2.cvtColor(template_image, cv2.COLOR_BGR2GRAY)
 
         res = cv2.matchTemplate(main_gray, template_gray, cv2.TM_CCOEFF_NORMED)
@@ -106,26 +126,22 @@ def process_screenshot():
         if max_val > best_val:
             best_val = max_val
             best_match = max_loc
-            best_template = template
+            best_template = label
+            best_path = template_path
 
     if best_val >= 0.7:  # Adjust threshold as needed
-        print(f"Best match found for template: {best_template} with value: {best_val}")
+        print(f"Best match found for template: {best_template} with value: {best_val}, file: {best_path}")
 
-        base_template = next(base for base in base_templates if base in best_template)
-        update_average(base_template, main_image)
-        save_image_info(image_id, base_template)
+        update_average(best_template, main_image)
+        save_image_info(image_id, best_template)
     else:
         print("No matches found.")
-        print("1: blind_play_template")
-        print("2: blind_reward_template")
-        print("3: blind_select_template")
-        print("4: pack_large_template")
-        print("5: pack_small_template")
-        print("6: shop_template")
+        for i, (label, _) in enumerate(templates, 1):
+            print(f"{i}: {label}")
         
-        user_input = input("Please assign a base template number (e.g., 1 for blind_play_template): ")
-        if user_input in [str(i) for i in range(1, 7)]:
-            base_template = list(base_templates.keys())[int(user_input) - 1]
+        user_input = input("Please assign a template number: ")
+        if user_input.isdigit() and 1 <= int(user_input) <= len(templates):
+            base_template = templates[int(user_input) - 1][0]
             update_average(base_template, main_image)
             save_image_info(image_id, base_template)
         else:
